@@ -4,7 +4,7 @@ import time
 import numba as nb
 import numpy as np
 import matplotlib
-import PIL
+from PIL import Image, PyAccess
 
 
 # Amount of times to print the total progress
@@ -22,15 +22,15 @@ RE_RANGE: float = 10  # For testing: 10/16
 
 # Show grid lines for integer real and imaginary parts
 SHOW_GRID: bool = False
-GRID_COLOR: tuple[int] = (125, 125, 125)
+GRID_COLOR: tuple[int, int, int] = (125, 125, 125)
 
 # Matplotlib named colormap
-COLORMAP_NAME = 'inferno'
+COLORMAP_NAME: str = 'inferno'
 
 # Color of the interior of the fractal (convergent points)
-INTERIOR_COLOR: tuple[int] = (0, 0, 60)
+INTERIOR_COLOR: tuple[int, int, int] = (0, 0, 60)
 # Color for large divergence counts
-ERROR_COLOR: tuple[int] = (0, 0, 60)
+ERROR_COLOR: tuple[int, int, int] = (0, 0, 60)
 
 
 # Plot range of the axes
@@ -79,7 +79,7 @@ for x0, x1, x2 in zip(c0, c1, c2):
 
 class DivType(enum.Enum):
     """Divergence type."""
-    
+
     MAX_ITER = 0  # Maximum iterations reached
     SLOW = 1  # Detected slow growth (maximum iterations will be reached)
     CYCLE = 2  # Cycled back to the same value after 8 iterations
@@ -90,6 +90,8 @@ class DivType(enum.Enum):
 
 @nb.jit(nb.float64(nb.float64, nb.int64), nopython=True)
 def smooth(x, k=1):
+    """Recursive exponential smoothing function."""
+
     y = np.expm1(np.pi*x)/np.expm1(np.pi)
     if k <= 1:
         return y
@@ -98,14 +100,20 @@ def smooth(x, k=1):
 
 @nb.jit(nb.float64(nb.float64), nopython=True)
 def get_delta_im(x):
-    nu = np.log(np.abs(x)/CUTOFF_IM) / (np.pi*CUTOFF_IM - np.log(CUTOFF_IM))
+    """Get the fractional part of the smoothed divergence count for
+    imaginary part blow-up."""
+
+    nu = np.log(np.abs(x)/CUTOFF_IM)/(np.pi*CUTOFF_IM - np.log(CUTOFF_IM))
     nu = np.fmax(0, np.fmin(nu, 1))
     return smooth(1 - nu, 2)
 
 
 @nb.jit(nb.float64(nb.float64, nb.float64), nopython=True)
 def get_delta_re(x, e):
-    nu = np.log(np.abs(x)/CUTOFF_RE) / np.log1p(e)
+    """Get the fractional part of the smoothed divergence count for
+    real part blow-up."""
+
+    nu = np.log(np.abs(x)/CUTOFF_RE)/np.log1p(e)
     nu = np.fmax(0, np.fmin(nu, 1))
     return 1 - nu
 
@@ -120,24 +128,24 @@ def get_delta_re(x, e):
 def divergence_count(z):
     """Return a smoothed divergence count and the type of divergence."""
 
+    delta_im = -1
+    delta_re = -1
     cycle = 0
     r0 = -1
     r_drops = 0  # Counter for number of consecutive times abs(r) decreases
-    delta_im = -1
-    delta_re = -1
     a, b = z.real, z.imag
     a_cycle, b_cycle = a, b
     cutoff_re_squared = CUTOFF_RE*CUTOFF_RE
-    
+
     for k in range(MAX_ITER):
-        
+
         e = 0.5*np.exp(-np.pi*b)
 
         cycle += 1
         if cycle == 8:
             cycle = 0
             r = e*np.hypot(0.5 + a, b)/(1e-6 + np.abs(b))
-            
+
             if r < r0 < 0.5:
                 r_drops += 1
             else:
@@ -146,22 +154,22 @@ def divergence_count(z):
             if r_drops >= MIN_R_DROPS:
                 delta = 0.25*(CUTOFF_RE - a)
                 return k + delta, DivType.LINEAR
-            
+
             # Detected slow growth (maximum iterations will be reached)
             if ((k >= MIN_ITER_SLOW) and (r0 <= r)
                     and (r + (r - r0)*(MAX_ITER - k) < 8*0.05)):
                 delta = 0.25*(CUTOFF_RE - a)
                 return k + delta, DivType.SLOW
             r0 = r
-            
+
             # Cycled back to the same value after 8 iterations
-            if ((a - a_cycle)**2 + (b - b_cycle)**2 < 1e-16):
+            if (a - a_cycle)**2 + (b - b_cycle)**2 < 1e-16:
                 return k, DivType.CYCLE
             a_cycle = a
             b_cycle = b
 
         a0 = a
-        b0 = b
+        # b0 = b
         s = np.sin(np.pi*a)
         c = np.cos(np.pi*a)
         # Equivalent to:
@@ -169,7 +177,7 @@ def divergence_count(z):
         # where z = a + b*1j
         a += e*(b*s - (0.5 + a)*c) + 0.25
         b -= e*(b*c + (0.5 + a0)*s)
-        
+
         if b < -CUTOFF_IM:
             delta_im = get_delta_im(-b)
         if a*a + b*b > cutoff_re_squared:
@@ -182,7 +190,7 @@ def divergence_count(z):
                 return k + delta_re, DivType.CUTOFF_RE
 
     # Maximum iterations reached
-    return k, DivType.MAX_ITER
+    return -1, DivType.MAX_ITER
 
 
 @nb.jit(nb.complex128(nb.float64, nb.float64), nopython=True)
@@ -195,16 +203,18 @@ def pixel_to_z(a, b):
 @nb.jit(nb.float64(nb.float64), nopython=True)
 def cyclic_map(g):
     """A continuous function that cycles back and forth between 0 and 1."""
+
     # This can be any continuous function.
     # Log scale removes high-frequency color cycles.
-    #g = np.log1p(np.fmax(0, g/freq_div)) - np.log1p(1/freq_div)
+    # freq_div = 1
+    # g = np.log1p(np.fmax(0, g/freq_div)) - np.log1p(1/freq_div)
+
+    # Beyond this value for float64, decimals are truncated
+    if g >= 2**51:
+        return -1
 
     # Normalize and cycle
-    #g += 0.5  # phase from 0 to 1
-    
-    # Beyond this value for float64, decimals are truncated
-    if g > 2251799813685247:
-        return -1
+    # g += 0.5  # phase from 0 to 1
     return 1 - np.abs(2*(g - np.floor(g)) - 1)
 
 
@@ -238,7 +248,7 @@ class Progress:
         self.steps = steps
         self.step = 1
         self.progress = 0
-    
+
     def check(self) -> bool:
         self.k += 1
         self.progress = self.k/self.n
@@ -249,8 +259,9 @@ class Progress:
 
 
 def create_image():
-    image = PIL.Image.new('RGB', (WIDTH, HEIGHT))
+    image = Image.new('RGB', (WIDTH, HEIGHT))
     pixels = image.load()
+    pixels: PyAccess
 
     prog = Progress(WIDTH, steps=PROGRESS_STEPS)
     for px in range(WIDTH):
@@ -268,7 +279,7 @@ def create_image():
             py = round((Y_MAX - y)*(HEIGHT - 1)/(Y_MAX - Y_MIN))
             for px in range(WIDTH):
                 pixels[px, py] = GRID_COLOR
-    
+
     return image
 
 
